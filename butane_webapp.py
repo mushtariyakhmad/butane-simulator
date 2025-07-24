@@ -78,7 +78,7 @@ st.markdown("""
 # Header
 st.markdown("""
 <div class="main-header">
-    <h1>🚀 Enhanced Butane Tank Thermal Simulation with Advanced Isp</h1>
+    <h1>🚀 Butane Tank Thermal Simulation with Advanced Isp</h1>
     <p style="text-align: center; color: white; margin: 0;">
         Advanced specific impulse calculations with constant and variable modes
     </p>
@@ -280,7 +280,7 @@ def calculate_constant_isp_heater_power(target_isp, p_chamber, T_chamber, p_ambi
 @st.cache_data
 def calculate_thrust_parameters(p_chamber, T_chamber, p_ambient, gamma, R_specific,
                                nozzle_efficiency=1.0, c_star_efficiency=0.95):
-    """Calculate thrust parameters using enhanced Isp calculation"""
+    """Calculate thrust parameters using Isp calculation"""
     
     isp_data = calculate_enhanced_isp(p_chamber, T_chamber, p_ambient, gamma, 
                                      R_specific, nozzle_efficiency, c_star_efficiency)
@@ -635,22 +635,22 @@ with st.sidebar:
     
     # Tank Configuration
     st.subheader("Tank Configuration")
-    initial_temp_c = st.slider("Initial Liquid Temperature (°C)", -20, 50, 20, 1)
-    tank_initial_temp_c = st.slider("Initial Tank Temperature (°C)", -20, 50, 20, 1)
-    initial_mass = st.slider("Initial Butane Mass (kg)", 0.001, 1.0, 0.1, 0.001)
-    tank_mass = st.slider("Tank Mass (kg)", 0.01, 0.5, 0.05, 0.01)
+    initial_temp_c = st.number_input("Initial Liquid Temperature (°C)", -20, 50, 20, 1)
+    tank_initial_temp_c = st.number_input("Initial Tank Temperature (°C)", -20, 50, 20, 1)
+    initial_mass = st.number_input("Initial Butane Mass (kg)", 0.001, 1.0, 0.1, 0.001)
+    tank_mass = st.number_input("Tank Mass (kg)", 0.01, 0.5, 0.05, 0.01)
     tank_material = st.selectbox("Tank Material", list(TANK_MATERIALS.keys()))
     
     # Flow and Nozzle Parameters
     st.subheader("Flow & Nozzle Configuration")
-    target_flow_rate = st.slider("Target Flow Rate (μg/s)", 1, 100, 10, 1) * 1e-6  # Convert to kg/s
-    nozzle_exit_area = st.slider("Nozzle Exit Area (mm²)", 0.1, 10.0, 1.0, 0.1) * 1e-6  # Convert to m²
-    ambient_pressure = st.slider("Ambient Pressure (bar)", 0.1, 2.0, 1.013, 0.001) * 1e5  # Convert to Pa
+    target_flow_rate = st.number_input("Target Flow Rate (μg/s)", 1, 100, 10, 1) * 1e-6  # Convert to kg/s
+    nozzle_exit_area = st.number_input("Nozzle Exit Area (mm²)", 0.1, 10.0, 1.0, 0.1) * 1e-6  # Convert to m²
+    ambient_pressure = st.number_input("Ambient Pressure (bar)", 0.1, 2.0, 1.013, 0.001) * 1e5  # Convert to Pa
     
     # Efficiency Parameters
     st.subheader("Efficiency Parameters")
-    nozzle_efficiency = st.slider("Nozzle Efficiency", 0.5, 1.0, 0.85, 0.01)
-    c_star_efficiency = st.slider("Combustion Efficiency", 0.7, 1.0, 0.95, 0.01)
+    nozzle_efficiency = st.number_input("Nozzle Efficiency", 0.5, 1.0, 0.85, 0.01)
+    c_star_efficiency = st.number_input("Combustion Efficiency", 0.7, 1.0, 0.95, 0.01)
     
     # Heater Configuration
     st.subheader("Heater Configuration")
