@@ -5,8 +5,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import math
-import io
-import base64
+import io 
+import base64 
 
 # Configure page
 st.set_page_config(
