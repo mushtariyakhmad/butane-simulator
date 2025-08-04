@@ -141,22 +141,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Physical Constants for Butane
-GAMMA = 1.05  # Specific heat ratio for butane
+GAMMA = 1.05  # Specific heat ratio for butane (k)
 R_BUTANE = 143.05  # Gas constant for butane (J/kg·K)
-NOZZLE_EFFICIENCY = 0.93  # 93% nozzle efficiency
 G0 = 9.80665  # Standard gravity (m/s²)
 MOLECULAR_WEIGHT_BUTANE = 58.12  # g/mol
-
-# Fixed Nozzle Geometry (converted to meters)
-THROAT_RADIUS_MM = 0.244  # mm
-EXIT_RADIUS_MM = 5.62  # mm
-A_THROAT_MM2 = np.pi * THROAT_RADIUS_MM**2  # mm²
-A_EXIT_MM2 = np.pi * EXIT_RADIUS_MM**2  # mm²
-EXPANSION_RATIO = A_EXIT_MM2 / A_THROAT_MM2
-
-# Convert areas to m²
-A_THROAT = A_THROAT_MM2 * 1e-6  # m²
-A_EXIT = A_EXIT_MM2 * 1e-6  # m²
 
 # Enhanced Cp data for butane (temperature in K, Cp in J/kg·K)
 # Based on NIST data with extended temperature range
@@ -174,72 +162,109 @@ def get_cp(T):
     """Get specific heat capacity at temperature T using interpolation."""
     return float(cp_interp(T))
 
-def compute_exhaust_velocity_isentropic(T_chamber, P_chamber, P_exit, gamma=GAMMA, R=R_BUTANE, efficiency=NOZZLE_EFFICIENCY):
+def compute_ideal_exhaust_velocity(T_chamber, P_chamber, P_exit, gamma=GAMMA, R=R_BUTANE):
     """
-    Compute exhaust velocity using isentropic flow equations.
-    
-    V₂ = η * √(2γR*T₁/(γ-1) * [1 - (P₂/P₁)^((γ-1)/γ)])
+    Compute ideal exhaust velocity using the specification formula:
+    υ₂ = √[(2k)/(k-1) * R*T₁ * (1 - (P₂/P₁)^((k-1)/k)]
     
     Args:
-        T_chamber: Chamber temperature (K)
-        P_chamber: Chamber pressure (Pa)
-        P_exit: Exit pressure (Pa)
-        gamma: Specific heat ratio
+        T_chamber: Chamber temperature T₁ (K)
+        P_chamber: Chamber pressure P₁ (Pa)
+        P_exit: Exit pressure P₂ (Pa)
+        gamma: Specific heat ratio k
         R: Gas constant (J/kg·K)
-        efficiency: Nozzle efficiency factor (0-1)
     
     Returns:
-        Exhaust velocity (m/s)
+        Ideal exhaust velocity (m/s)
     """
     if P_chamber <= P_exit:
-        return 0.0  # No flow possible
+        return 0.0
     
     pressure_ratio = P_exit / P_chamber
+    pressure_ratio = max(pressure_ratio, 1e-10)  # Prevent numerical issues
     
-    # Prevent numerical issues with very small pressure ratios
+    # Formula from specification: υ₂ = √[(2k)/(k-1) * R*T₁ * (1 - (P₂/P₁)^((k-1)/k)]
+    term1 = (2 * gamma) / (gamma - 1)
+    term2 = R * T_chamber
+    term3 = 1 - pressure_ratio**((gamma - 1) / gamma)
+    
+    if term3 < 0:
+        term3 = 0
+    
+    v_ideal = np.sqrt(term1 * term2 * term3)
+    return v_ideal
+
+def compute_throat_area_from_specification(mass_flow_rate, P_chamber, T_chamber, gamma=GAMMA, R=R_BUTANE):
+    """
+    Compute throat area using the specification formula:
+    Aₜ = (ṁ/P₁) * √[ (R*T₁) / (k * [2/(k+1)]^((k+1)/(k-1))) ]
+    
+    Args:
+        mass_flow_rate: Mass flow rate ṁ (kg/s)
+        P_chamber: Chamber pressure P₁ (Pa)
+        T_chamber: Chamber temperature T₁ (K)
+        gamma: Specific heat ratio k
+        R: Gas constant (J/kg·K)
+    
+    Returns:
+        Throat area (m²)
+    """
+    if mass_flow_rate <= 0 or P_chamber <= 0 or T_chamber <= 0:
+        return 0.0
+    
+    # Formula: Aₜ = (ṁ/P₁) * √[ (R*T₁) / (k * [2/(k+1)]^((k+1)/(k-1))) ]
+    term1 = mass_flow_rate / P_chamber
+    term2_numerator = R * T_chamber
+    term2_denominator = gamma * ((2 / (gamma + 1))**((gamma + 1) / (gamma - 1)))
+    term2 = np.sqrt(term2_numerator / term2_denominator)
+    
+    A_throat = term1 * term2
+    return A_throat
+
+def compute_exit_area_from_specification(A_throat, P_chamber, P_exit, gamma=GAMMA):
+    """
+    Compute exit area using the specification formula:
+    A₂ = Aₜ * [ ( (k+1)/2 )^(1/(k-1)) * (P₂/P₁)^(1/k) * √( (k+1)/(k-1) * (1 - (P₂/P₁)^((k-1)/k)) ) ]
+    
+    Args:
+        A_throat: Throat area Aₜ (m²)
+        P_chamber: Chamber pressure P₁ (Pa)
+        P_exit: Exit pressure P₂ (Pa)
+        gamma: Specific heat ratio k
+    
+    Returns:
+        Exit area (m²)
+    """
+    if P_chamber <= P_exit or A_throat <= 0:
+        return A_throat
+    
+    pressure_ratio = P_exit / P_chamber
     pressure_ratio = max(pressure_ratio, 1e-10)
     
-    # Isentropic expansion formula
-    term1 = (2 * gamma * R * T_chamber) / (gamma - 1)
-    term2 = 1 - pressure_ratio**((gamma - 1) / gamma)
+    # Formula: A₂ = Aₜ * [ ( (k+1)/2 )^(1/(k-1)) * (P₂/P₁)^(1/k) * √( (k+1)/(k-1) * (1 - (P₂/P₁)^((k-1)/k)) ) ]
+    term1 = ((gamma + 1) / 2)**(1 / (gamma - 1))
+    term2 = pressure_ratio**(1 / gamma)
+    term3_inner = ((gamma + 1) / (gamma - 1)) * (1 - pressure_ratio**((gamma - 1) / gamma))
+    term3_inner = max(term3_inner, 0)  # Prevent negative values under square root
+    term3 = np.sqrt(term3_inner)
     
-    if term2 < 0:
-        term2 = 0  # Prevent negative values under square root
-    
-    v_ideal = np.sqrt(term1 * term2)
-    
-    # Apply nozzle efficiency
-    v_actual = v_ideal * efficiency
-    
-    return v_actual
+    A_exit = A_throat * term1 * term2 * term3
+    return A_exit
 
-def compute_specific_impulse(exhaust_velocity):
+def compute_thrust_force_from_specification(mass_flow_rate, exhaust_velocity, P_exit, P_ambient, A_exit):
     """
-    Compute specific impulse from exhaust velocity.
-    Isp = V₂ / g₀
+    Compute thrust force using the specification formula:
+    F = ṁ*υ₂ + (P₂ - P₃)*A₂
     
     Args:
-        exhaust_velocity: Exhaust velocity (m/s)
+        mass_flow_rate: Mass flow rate ṁ (kg/s)
+        exhaust_velocity: Exhaust velocity υ₂ (m/s)
+        P_exit: Nozzle exit pressure P₂ (Pa)
+        P_ambient: Ambient pressure P₃ (Pa)
+        A_exit: Exit area A₂ (m²)
     
     Returns:
-        Specific impulse (s)
-    """
-    return exhaust_velocity / G0
-
-def compute_thrust_force(mass_flow_rate, exhaust_velocity, P_exit, P_ambient, A_exit):
-    """
-    Compute thrust force using momentum and pressure thrust.
-    F = ṁ*V₂ + (P₂ - P₃)*A₂
-    
-    Args:
-        mass_flow_rate: Mass flow rate (kg/s)
-        exhaust_velocity: Exhaust velocity (m/s)
-        P_exit: Exit pressure (Pa)
-        P_ambient: Ambient pressure (Pa)
-        A_exit: Exit area (m²)
-    
-    Returns:
-        Thrust force (N), momentum thrust (N), pressure thrust (N)
+        Thrust force F (N), momentum thrust (N), pressure thrust (N)
     """
     momentum_thrust = mass_flow_rate * exhaust_velocity
     pressure_thrust = (P_exit - P_ambient) * A_exit
@@ -247,18 +272,26 @@ def compute_thrust_force(mass_flow_rate, exhaust_velocity, P_exit, P_ambient, A_
     
     return total_thrust, momentum_thrust, pressure_thrust
 
-def update_chamber_temperature(T_current, Q_input, mass_flow_rate, dt, cp_func):
+def compute_specific_impulse(exhaust_velocity):
     """
-    Update chamber temperature based on energy balance.
-    Q = ṁ * Cp * dT/dt
-    dT/dt = Q / (ṁ * Cp)
+    Compute specific impulse from exhaust velocity.
+    Isp = υ₂ / g₀
+    """
+    return exhaust_velocity / G0
+
+def update_chamber_temperature_dynamic_cp(T_current, Q_input, mass_flow_rate, dt):
+    """
+    Update chamber temperature using dynamic Cp(T) and the energy balance equation:
+    Q = ṁ * Cp(T) * dT/dt
+    dT/dt = Q / (ṁ * Cp(T))
+    
+    This follows the Simulink model specification.
     
     Args:
         T_current: Current temperature (K)
         Q_input: Heat input rate (W)
         mass_flow_rate: Mass flow rate (kg/s)
         dt: Time step (s)
-        cp_func: Function to get Cp at given temperature
     
     Returns:
         New temperature (K)
@@ -266,20 +299,26 @@ def update_chamber_temperature(T_current, Q_input, mass_flow_rate, dt, cp_func):
     if mass_flow_rate <= 0:
         return T_current
     
-    cp_current = cp_func(T_current)
+    # Get dynamic Cp at current temperature
+    cp_current = get_cp(T_current)
+    
+    # Prevent division by zero or unrealistic values
+    if cp_current < 1e-6:
+        return T_current
+    
+    # Energy balance: Q = ṁ * Cp * dT/dt → dT/dt = Q / (ṁ * Cp)
     dT_dt = Q_input / (mass_flow_rate * cp_current)
     T_new = T_current + dT_dt * dt
     
-    # Ensure temperature doesn't go below absolute zero or become unrealistic
+    # Ensure temperature stays within reasonable bounds
     T_new = max(T_new, 200)  # Minimum reasonable temperature
     T_new = min(T_new, 3000)  # Maximum reasonable temperature
     
     return T_new
 
-def compute_chamber_pressure_choked_flow(T_chamber, mass_flow_rate, A_throat, gamma=GAMMA, R=R_BUTANE):
+def compute_chamber_pressure_from_choked_flow(T_chamber, mass_flow_rate, A_throat, gamma=GAMMA, R=R_BUTANE):
     """
-    Compute chamber pressure for choked flow conditions.
-    For choked flow: ṁ = P₁ * A* * √(γ/RT₁) * (2/(γ+1))^((γ+1)/(2(γ-1)))
+    Compute chamber pressure assuming choked flow at the throat.
     
     Args:
         T_chamber: Chamber temperature (K)
@@ -294,144 +333,132 @@ def compute_chamber_pressure_choked_flow(T_chamber, mass_flow_rate, A_throat, ga
     if T_chamber <= 0 or mass_flow_rate <= 0 or A_throat <= 0:
         return 0.0
     
-    # Choked flow coefficient
+    # Choked flow mass flow rate: ṁ = A* * P₁ * √(k/RT₁) * (2/(k+1))^((k+1)/(2(k-1)))
+    # Solving for P₁: P₁ = ṁ / (A* * √(k/RT₁) * (2/(k+1))^((k+1)/(2(k-1))))
+    
     term1 = np.sqrt(gamma / (R * T_chamber))
-    term2 = (2 / (gamma + 1))**((gamma + 1) / (2 * (gamma - 1)))
+    term2 = ((2 / (gamma + 1))**((gamma + 1) / (2 * (gamma - 1))))
     choked_coeff = term1 * term2
     
-    # Solve for chamber pressure
     P_chamber = mass_flow_rate / (A_throat * choked_coeff)
-    
     return P_chamber
 
-def compute_exit_mach_number(P_chamber, P_exit, gamma=GAMMA):
+def compute_orifice_mass_flow_rate(orifice_area, upstream_pressure, downstream_pressure, temperature, 
+                                 discharge_coefficient=0.6, gamma=GAMMA, R=R_BUTANE):
     """
-    Compute exit Mach number from pressure ratio.
+    Compute mass flow rate through an orifice using choked or unchoked flow equations.
     
     Args:
-        P_chamber: Chamber pressure (Pa)
-        P_exit: Exit pressure (Pa)
+        orifice_area: Orifice cross-sectional area (m²)
+        upstream_pressure: Upstream pressure (Pa)
+        downstream_pressure: Downstream pressure (Pa)
+        temperature: Upstream temperature (K)
+        discharge_coefficient: Orifice discharge coefficient (dimensionless)
         gamma: Specific heat ratio
+        R: Gas constant (J/kg·K)
     
     Returns:
-        Exit Mach number
+        Mass flow rate (kg/s)
     """
-    if P_chamber <= P_exit:
+    if upstream_pressure <= downstream_pressure or orifice_area <= 0 or temperature <= 0:
         return 0.0
     
-    pressure_ratio = P_exit / P_chamber
+    pressure_ratio = downstream_pressure / upstream_pressure
+    critical_pressure_ratio = (2 / (gamma + 1))**(gamma / (gamma - 1))
     
-    # For isentropic flow: P₂/P₁ = (1 + (γ-1)/2 * M²)^(-γ/(γ-1))
-    # Solving for M: M = √(2/(γ-1) * [(P₁/P₂)^((γ-1)/γ) - 1])
-    term = (1 / pressure_ratio)**((gamma - 1) / gamma) - 1
-    if term <= 0:
-        return 0.0
+    # Density at upstream conditions
+    rho_upstream = upstream_pressure / (R * temperature)
     
-    mach = np.sqrt((2 / (gamma - 1)) * term)
-    return mach
+    if pressure_ratio <= critical_pressure_ratio:
+        # Choked flow
+        velocity = np.sqrt(gamma * R * temperature)  # Sonic velocity
+        mass_flow_rate = discharge_coefficient * orifice_area * rho_upstream * velocity * (2 / (gamma + 1))**((gamma + 1) / (2 * (gamma - 1)))
+    else:
+        # Unchoked flow
+        term1 = 2 * gamma / (gamma - 1)
+        term2 = pressure_ratio**(2 / gamma) - pressure_ratio**((gamma + 1) / gamma)
+        velocity = np.sqrt(term1 * R * temperature * term2)
+        rho_downstream = downstream_pressure / (R * temperature)
+        mass_flow_rate = discharge_coefficient * orifice_area * np.sqrt(2 * rho_upstream * (upstream_pressure - downstream_pressure))
+    
+    return mass_flow_rate
 
 def validate_simulation_parameters(params):
     """
     Validate simulation parameters and return warnings/errors.
-    
-    Args:
-        params: Dictionary of simulation parameters
-    
-    Returns:
-        List of validation messages
     """
     messages = []
     
     # Temperature validation
     if params['T_initial'] < 200:
-        messages.append(("danger", "Initial temperature too low (< 200K). May cause unrealistic results."))
+        messages.append(("danger", "Initial chamber temperature too low (< 200K). May cause unrealistic results."))
     elif params['T_initial'] > 1500:
-        messages.append(("warning", "Initial temperature very high (> 1500K). Ensure realistic for your application."))
+        messages.append(("warning", "Initial chamber temperature very high (> 1500K). Ensure realistic for your application."))
     elif params['T_initial'] > 500:
-        messages.append(("good", "Initial temperature in good range for resistojet operation."))
+        messages.append(("good", "Initial chamber temperature in good range for resistojet operation."))
     else:
-        messages.append(("excellent", "Initial temperature in excellent range for cold gas thrusters."))
-    
-    # Mass flow rate validation
-    if params['mass_flow_rate'] < 0.001:
-        messages.append(("warning", "Very low mass flow rate. May not sustain stable combustion."))
-    elif params['mass_flow_rate'] > 0.050:
-        messages.append(("warning", "High mass flow rate. Ensure adequate heat input."))
-    else:
-        messages.append(("good", "Mass flow rate in reasonable range."))
+        messages.append(("excellent", "Initial chamber temperature in excellent range for cold gas thrusters."))
     
     # Pressure ratio validation
-    P_ratio = params['P_ambient'] / params['P_exit']
-    if P_ratio > 0.5:
-        messages.append(("danger", "Ambient pressure too close to exit pressure. May cause flow separation."))
-    elif P_ratio > 0.1:
-        messages.append(("warning", "High ambient to exit pressure ratio. Check nozzle design."))
+    if params['P_exit'] <= 0 or params['P_ambient'] <= 0:
+        messages.append(("danger", "Pressures must be positive."))
     else:
-        messages.append(("good", "Good pressure ratio for efficient expansion."))
+        P_ratio = params['P_ambient'] / params['P_exit']
+        if P_ratio > 0.5:
+            messages.append(("danger", "Ambient pressure too close to exit pressure. May cause flow separation."))
+        elif P_ratio > 0.1:
+            messages.append(("warning", "High ambient to exit pressure ratio. Check nozzle design."))
+        else:
+            messages.append(("good", "Good pressure ratio for efficient expansion."))
     
-    # Heat input validation
-    heat_per_mass = params['Q_input'] / (params['mass_flow_rate'] / 1000)  # W per kg/s
-    if heat_per_mass < 1000:
-        messages.append(("warning", "Low specific heat input. Temperature rise may be minimal."))
-    elif heat_per_mass > 50000:
-        messages.append(("danger", "Very high specific heat input. May cause unrealistic temperatures."))
+    # Orifice validation
+    if params['orifice_diameter'] <= 0:
+        messages.append(("danger", "Orifice diameter must be positive."))
+    
+    # Flow validation
+    expected_flow = params['orifice_diameter'] * 1000  # Rough estimate
+    if expected_flow < 0.001:
+        messages.append(("warning", "Very small orifice may result in very low flow rates."))
+    elif expected_flow > 1.0:
+        messages.append(("warning", "Large orifice may result in very high flow rates."))
     else:
-        messages.append(("good", "Heat input appropriate for mass flow rate."))
+        messages.append(("good", "Orifice size appears reasonable."))
     
-    return messages 
-
-def compute_theoretical_performance(T_chamber, P_chamber, P_exit):
-    """
-    Compute theoretical performance metrics.
-    
-    Args:
-        T_chamber: Chamber temperature (K)
-        P_chamber: Chamber pressure (Pa)
-        P_exit: Exit pressure (Pa)
-        mass_flow_rate: Mass flow rate (kg/s)
-    
-    Returns:
-        Dictionary of theoretical performance metrics
-    """
-    # Exit Mach number
-    M_exit = compute_exit_mach_number(P_chamber, P_exit, GAMMA)
-    
-    # Exit temperature (isentropic relation)
-    T_exit = T_chamber * (P_exit / P_chamber)**((GAMMA - 1) / GAMMA)
-    
-    # Characteristic velocity (c*)
-    c_star = np.sqrt(GAMMA * R_BUTANE * T_chamber) / GAMMA * np.sqrt((2 / (GAMMA + 1))**((GAMMA + 1) / (GAMMA - 1)))
-    
-    # Thrust coefficient
-    pressure_ratio = P_exit / P_chamber
-    Cf = np.sqrt(2 * GAMMA**2 / (GAMMA - 1) * (2 / (GAMMA + 1))**((GAMMA + 1) / (GAMMA - 1)) * 
-                (1 - pressure_ratio**((GAMMA - 1) / GAMMA)))
-    
-    return {
-        'exit_mach': M_exit,
-        'exit_temperature': T_exit,
-        'characteristic_velocity': c_star,
-        'thrust_coefficient': Cf
-    }
+    return messages
 
 def run_enhanced_simulation(params):
     """
-    Run the enhanced thruster simulation with realistic thermodynamics.
-    
-    Args:
-        params: Dictionary of simulation parameters
-    
-    Returns:
-        Dictionary containing comprehensive results
+    Run the enhanced thruster simulation following project specifications.
     """
     # Extract parameters
     T_initial = params['T_initial']
     Q_input = params['Q_input']
-    mass_flow_rate = params['mass_flow_rate'] / 1000  # Convert g/s to kg/s
-    P_exit = params['P_exit'] * 1e6  # Convert MPa to Pa
-    P_ambient = params['P_ambient'] * 1e6  # Convert MPa to Pa
+    P_exit = params['P_exit']
+    P_ambient = params['P_ambient']
     total_time = params['total_time']
     dt = params['dt']
+    
+    # Tank and orifice parameters
+    initial_butane_mass = params['initial_butane_mass']
+    tank_volume = params['tank_volume']  # L
+    tank_temperature = params['tank_temperature']  # K
+    orifice_diameter = params['orifice_diameter']  # mm
+    discharge_coefficient = params['discharge_coefficient']
+
+    # New tunable nozzle geometry parameters
+    user_throat_diameter = params['throat_diameter']
+    user_exit_diameter = params['exit_diameter']
+    
+    # Calculate areas from user inputs
+    A_throat_fixed = np.pi * (user_throat_diameter * 1e-3 / 2)**2
+    A_exit_fixed = np.pi * (user_exit_diameter * 1e-3 / 2)**2
+    
+    # Calculate other fixed areas
+    A_orifice = np.pi * (orifice_diameter * 1e-3 / 2)**2  # Convert mm to m
+    expansion_ratio = A_exit_fixed / A_throat_fixed if A_throat_fixed > 0 else 0
+    
+    # Nozzle efficiency
+    nozzle_efficiency = params['nozzle_efficiency'] / 100
     
     # Initialize arrays
     times = np.arange(0, total_time + dt, dt)
@@ -446,78 +473,119 @@ def run_enhanced_simulation(params):
     momentum_thrusts = np.zeros(n_steps)
     pressure_thrusts = np.zeros(n_steps)
     cp_values = np.zeros(n_steps)
-    mach_numbers = np.zeros(n_steps)
-    exit_temperatures = np.zeros(n_steps)
+    mass_flow_rates = np.zeros(n_steps)
+    tank_pressures = np.zeros(n_steps)
+    butane_masses = np.zeros(n_steps)
+    throat_areas_computed = np.zeros(n_steps)
+    exit_areas_computed = np.zeros(n_steps)
     
     # Initial conditions
     T_chamber = T_initial
+    current_butane_mass = initial_butane_mass
     
     # Simulation loop
     for i in range(n_steps):
-        # Store current temperature
+        # Calculate tank pressure (ideal gas law)
+        if current_butane_mass > 0:
+            tank_pressure_pa = (current_butane_mass / (tank_volume * 1e-3)) * R_BUTANE * tank_temperature
+        else:
+            tank_pressure_pa = 0.0
+        
+        tank_pressures[i] = tank_pressure_pa
+        butane_masses[i] = current_butane_mass
         temperatures[i] = T_chamber
+        cp_values[i] = get_cp(T_chamber)
         
-        # Get current Cp
-        cp_current = get_cp(T_chamber)
-        cp_values[i] = cp_current
+        # Compute mass flow rate through orifice
+        P_chamber_estimate = tank_pressure_pa * 0.8  
         
-        # Compute chamber pressure for choked flow
-        P_chamber = compute_chamber_pressure_choked_flow(T_chamber, mass_flow_rate, A_THROAT, GAMMA, R_BUTANE)
+        mass_flow_rate = compute_orifice_mass_flow_rate(
+            A_orifice, tank_pressure_pa, P_chamber_estimate, 
+            tank_temperature, discharge_coefficient, GAMMA, R_BUTANE
+        )
+        
+        # Limit mass flow rate to available mass
+        mass_flow_rate = min(mass_flow_rate, current_butane_mass / dt)
+        mass_flow_rates[i] = mass_flow_rate
+        
+        if mass_flow_rate <= 0:
+            # No flow
+            chamber_pressures[i] = 0.0
+            exhaust_velocities[i] = 0.0
+            specific_impulses[i] = 0.0
+            thrust_forces[i] = 0.0
+            momentum_thrusts[i] = 0.0
+            pressure_thrusts[i] = 0.0
+            throat_areas_computed[i] = 0.0
+            exit_areas_computed[i] = 0.0
+            continue
+        
+        # Compute chamber pressure from choked flow at throat
+        P_chamber = compute_chamber_pressure_from_choked_flow(T_chamber, mass_flow_rate, A_throat_fixed, GAMMA, R_BUTANE)
         chamber_pressures[i] = P_chamber
         
-        # Compute exhaust velocity
-        v_exhaust = compute_exhaust_velocity_isentropic(T_chamber, P_chamber, P_exit, GAMMA, R_BUTANE, NOZZLE_EFFICIENCY)
-        exhaust_velocities[i] = v_exhaust
+        # Compute areas using specification formulas (for comparison)
+        A_throat_spec = compute_throat_area_from_specification(mass_flow_rate, P_chamber, T_chamber, GAMMA, R_BUTANE)
+        A_exit_spec = compute_exit_area_from_specification(A_throat_fixed, P_chamber, P_exit, GAMMA)
+        throat_areas_computed[i] = A_throat_spec
+        exit_areas_computed[i] = A_exit_spec
+        
+        # Compute ideal exhaust velocity using specification formula
+        v_ideal = compute_ideal_exhaust_velocity(T_chamber, P_chamber, P_exit, GAMMA, R_BUTANE)
+        v_actual = v_ideal * nozzle_efficiency  # Apply efficiency
+        exhaust_velocities[i] = v_actual
         
         # Compute specific impulse
-        isp = compute_specific_impulse(v_exhaust)
+        isp = compute_specific_impulse(v_actual)
         specific_impulses[i] = isp
         
-        # Compute thrust components
-        F_total, F_momentum, F_pressure = compute_thrust_force(mass_flow_rate, v_exhaust, P_exit, P_ambient, A_EXIT)
+        # Compute thrust using specification formula
+        F_total, F_momentum, F_pressure = compute_thrust_force_from_specification(
+            mass_flow_rate, v_actual, P_exit, P_ambient, A_exit_fixed
+        )
         thrust_forces[i] = F_total
         momentum_thrusts[i] = F_momentum
         pressure_thrusts[i] = F_pressure
         
-        # Compute additional metrics
-        M_exit = compute_exit_mach_number(P_chamber, P_exit, GAMMA)
-        mach_numbers[i] = M_exit
-        
-        T_exit = T_chamber * (P_exit / P_chamber)**((GAMMA - 1) / GAMMA) if P_chamber > 0 else T_chamber
-        exit_temperatures[i] = T_exit
-        
-        # Update temperature for next time step (except for last iteration)
+        # Update temperature for next time step using dynamic Cp
         if i < n_steps - 1:
-            T_chamber = update_chamber_temperature(T_chamber, Q_input, mass_flow_rate, dt, get_cp)
-    
-    # Compute theoretical performance for final state
-    theoretical = compute_theoretical_performance(temperatures[-1], chamber_pressures[-1], P_exit)
+            T_chamber = update_chamber_temperature_dynamic_cp(T_chamber, Q_input, mass_flow_rate, dt)
+            current_butane_mass -= mass_flow_rate * dt
+            current_butane_mass = max(current_butane_mass, 0)
     
     return {
         'times': times,
         'temperatures': temperatures,
-        'chamber_pressures': chamber_pressures / 1e6,  # Convert back to MPa for display
+        'chamber_pressures': chamber_pressures,
         'exhaust_velocities': exhaust_velocities,
         'specific_impulses': specific_impulses,
         'thrust_forces': thrust_forces,
         'momentum_thrusts': momentum_thrusts,
         'pressure_thrusts': pressure_thrusts,
         'cp_values': cp_values,
-        'mach_numbers': mach_numbers,
-        'exit_temperatures': exit_temperatures,
-        'mass_flow_rate': mass_flow_rate,
-        'theoretical': theoretical,
+        'mass_flow_rates': mass_flow_rates,
+        'tank_pressures': tank_pressures,
+        'butane_masses': butane_masses,
+        'throat_areas_computed': throat_areas_computed,
+        'exit_areas_computed': exit_areas_computed,
+        'nozzle_geometry': {
+            'throat_area_fixed': A_throat_fixed,
+            'exit_area_fixed': A_exit_fixed,
+            'expansion_ratio': expansion_ratio,
+            'orifice_area': A_orifice
+        },
         'final_values': {
             'temperature': temperatures[-1],
-            'chamber_pressure': chamber_pressures[-1] / 1e6,
+            'chamber_pressure': chamber_pressures[-1],
             'exhaust_velocity': exhaust_velocities[-1],
             'specific_impulse': specific_impulses[-1],
             'thrust': thrust_forces[-1],
             'cp': cp_values[-1],
-            'mach_number': mach_numbers[-1],
-            'exit_temperature': exit_temperatures[-1]
+            'mass_flow_rate': mass_flow_rates[-1],
+            'tank_pressure': tank_pressures[-1]
         }
     }
+
 
 # Streamlit Application
 def main():
@@ -526,586 +594,298 @@ def main():
     <div class="hero-header">
         <h1>🚀 Butane Thruster Simulation</h1>
         <p style="font-size: 1.2rem; margin-top: 1rem;">
-            Thermodynamic modeling with realistic Isp calculations
+            Complete thermodynamic modeling with tunable nozzle geometry and tank parameters
         </p>
     </div>
     """, unsafe_allow_html=True)
+    
     
     # Sidebar for input parameters
     with st.sidebar:
         st.header("🔧 Simulation Parameters")
         
-        # Thermodynamic parameters
+        # --- Butane Tank Settings ---
         st.markdown('<div class="parameter-section">', unsafe_allow_html=True)
-        st.subheader("Thermodynamic Properties")
+        st.subheader("Butane Tank Settings")
+
+        tank_volume = st.number_input(
+            "Tank Volume (L)",
+            min_value=0.1,
+            max_value=10.0,
+            value=1.0,
+            step=0.1,
+            format="%.2f",
+            help="Volume of the butane tank in Liters."
+        )
+
+        tank_temperature = st.number_input(
+            "Tank Temperature (K)",
+            min_value=200.0,
+            max_value=400.0,
+            value=293.15,
+            step=0.1,
+            format="%.2f",
+            help="Temperature of the butane tank in Kelvin."
+        )
+
+        initial_butane_mass = st.number_input(
+            "Initial Butane Mass (kg)",
+            min_value=0.001,
+            max_value=10.0,
+            value=0.100,
+            step=0.01,
+            format="%.3f",
+            help="Initial mass of butane in the tank."
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
         
+        # --- Thruster Chamber and Nozzle Settings ---
+        st.markdown('<div class="parameter-section">', unsafe_allow_html=True)
+        st.subheader("Thruster Chamber & Nozzle")
+
+        # Tunable Orifice Input
+        orifice_diameter = st.number_input(
+            "Orifice Diameter (mm)",
+            min_value=0.05,
+            max_value=1.0,
+            value=0.25,
+            step=0.01,
+            format="%.2f",
+            help="Diameter of the inlet orifice from the tank to the chamber. Adjusting this changes the mass flow rate."
+        )
+
+        discharge_coefficient = st.number_input(
+            "Discharge Coefficient",
+            min_value=0.5,
+            max_value=1.0,
+            value=0.6,
+            step=0.01,
+            format="%.2f",
+            help="Coefficient of discharge for the orifice (accounts for real-world losses)."
+        )
+        
+        # NEW: Tunable Nozzle Geometry
+        st.subheader("Nozzle Geometry")
+        throat_diameter = st.number_input(
+            "Throat Diameter (mm)",
+            min_value=0.1,
+            max_value=2.0,
+            value=0.488,  # Default to original spec
+            step=0.01,
+            format="%.3f",
+            help="Diameter of the nozzle throat. This controls mass flow choking."
+        )
+        
+        exit_diameter = st.number_input(
+            "Exit Diameter (mm)",
+            min_value=1.0,
+            max_value=20.0,
+            value=11.24, # Default to original spec
+            step=0.1,
+            format="%.2f",
+            help="Diameter of the nozzle exit. This controls the expansion ratio and thrust."
+        )
+        
+        st.caption(f"Calculated Expansion Ratio: { (exit_diameter/throat_diameter)**2:.2f}")
+
+        nozzle_efficiency = st.slider(
+            "Nozzle Efficiency (%)",
+            min_value=50,
+            max_value=100,
+            value=95,
+            step=1,
+            help="The percentage of ideal exhaust velocity achieved in practice."
+        )
+
+        Q_input = st.number_input(
+            "Heat Input Rate (W)",
+            min_value=0.0,
+            max_value=100.0,
+            value=10.0,
+            step=0.5,
+            format="%.1f",
+            help="Constant heat added to the chamber (e.g., from a heating element)."
+        )
+
         T_initial = st.number_input(
             "Initial Chamber Temperature (K)",
             min_value=200.0,
             max_value=2000.0,
-            value=350.0,
-            step=0.1,
-            format="%.2f", 
-            help="Starting temperature of the combustion chamber"
-        )
-        
-        Q_input = st.number_input(
-            "Heat Input Rate (W)",
-            min_value=1.0,
-            max_value=200.0,
-            value=20.0,
-            step=0.1,
-            format="%.2f", 
-            help="Constant heat input to the thruster"
-        )
-        
-        mass_flow_rate = st.number_input(
-            "Mass Flow Rate (g/s)",
-            min_value=0.001,
-            max_value=0.100,
-            value=0.008,
-            step=0.001,
-            format="%.3f",
-            help="Propellant mass flow rate"
+            value=300.0,
+            step=1.0,
+            help="The starting temperature of the butane gas in the chamber."
         )
         st.markdown('</div>', unsafe_allow_html=True)
         
-        # Pressure parameters
+        # --- Environment & Simulation Settings ---
         st.markdown('<div class="parameter-section">', unsafe_allow_html=True)
-        st.subheader("Pressure Conditions")
-        
+        st.subheader("Environment & Simulation")
+
         P_exit = st.number_input(
-            "Nozzle Exit Pressure (MPa)",
-            min_value=0.001,
-            max_value=1.0,
-            value=0.002,
-            step=0.001,
-            format="%.3f",
-            help="Pressure at nozzle exit (P₂)"
+            "Nozzle Exit Pressure (Pa)",
+            min_value=1000.0,
+            max_value=100000.0,
+            value=25000.0,
+            step=1000.0,
+            help="The pressure at the nozzle's exit plane."
         )
-        
+
         P_ambient = st.number_input(
-            "Ambient Pressure (MPa)",
-            min_value=0.000001,
-            max_value=0.1013,
-            value=0.0001,
-            step=0.000001,
-            format="%.6f",
-            help="Environmental pressure (P₃)"
+            "Ambient Pressure (Pa)",
+            min_value=0.0,
+            max_value=101325.0,
+            value=0.0,
+            step=1000.0,
+            help="The pressure of the surrounding environment (0 for vacuum)."
         )
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Simulation parameters
-        st.markdown('<div class="parameter-section">', unsafe_allow_html=True)
-        st.subheader("Simulation Settings")
         
         total_time = st.number_input(
-            "Simulation Duration (s)",
+            "Total Simulation Time (s)",
             min_value=1.0,
             max_value=600.0,
-            value=30.0,
-            step=0.1,
-            format="%.2f", 
-
-            help="Total simulation time"
+            value=100.0,
+            step=10.0,
+            help="The total duration of the simulation."
         )
         
-        dt = st.selectbox(
+        dt = st.number_input(
             "Time Step (s)",
-            options=[0.01, 0.05, 0.1, 0.5, 1.0],
-            index=2,
-            help="Simulation time step resolution"
+            min_value=0.001,
+            max_value=1.0,
+            value=0.1,
+            step=0.01,
+            format="%.3f",
+            help="The time increment for each simulation step. A smaller value increases accuracy but slows down the simulation."
         )
         st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Fixed parameters display
-        st.markdown('<div class="parameter-section">', unsafe_allow_html=True)
-        st.subheader("Fixed Parameters")
-        st.markdown(f"**Throat Radius:** {THROAT_RADIUS_MM:.3f} mm")
-        st.markdown(f"**Exit Radius:** {EXIT_RADIUS_MM:.3f} mm")
-        st.markdown(f"**Expansion Ratio:** {EXPANSION_RATIO:.1f}")
-        st.markdown(f"**Nozzle Efficiency:** {NOZZLE_EFFICIENCY*100:.0f}%")
-        st.markdown(f"**k (Butane):** {GAMMA}")
-        st.markdown(f"**R (Butane):** {R_BUTANE:.1f} J/kg·K")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
+
+        st.markdown('<br>', unsafe_allow_html=True)
+        if st.button("Run Simulation", use_container_width=True):
+            st.session_state['run_sim'] = True
+        else:
+            st.session_state['run_sim'] = False
+
     # Main content area
-    col1, col2 = st.columns([3, 1])
-    
-    with col2:
-        run_simulation = st.button("🚀 Run Simulation", type="primary", use_container_width=True)
+    if st.session_state.get('run_sim', False):
+        st.info("Simulation running...")
         
-        if st.button("📊 Show Cp Lookup Table", use_container_width=True):
-            st.subheader("Butane Cp Lookup Table")
-            cp_df = pd.DataFrame({
-                'Temperature (K)': T_CP_DATA,
-                'Cp (J/kg·K)': CP_DATA
-            })
-            st.dataframe(cp_df, height=300)
-        
-        # Parameter validation
-        sim_params = {
+        # Package parameters for validation and simulation
+        params = {
             'T_initial': T_initial,
             'Q_input': Q_input,
-            'mass_flow_rate': mass_flow_rate,
             'P_exit': P_exit,
             'P_ambient': P_ambient,
             'total_time': total_time,
-            'dt': dt
+            'dt': dt,
+            'initial_butane_mass': initial_butane_mass,
+            'tank_volume': tank_volume,
+            'tank_temperature': tank_temperature,
+            'orifice_diameter': orifice_diameter,
+            'discharge_coefficient': discharge_coefficient,
+            'nozzle_efficiency': nozzle_efficiency,
+            'throat_diameter': throat_diameter,  # New parameter
+            'exit_diameter': exit_diameter,      # New parameter
         }
         
-        validation_messages = validate_simulation_parameters(sim_params)
+        # Run validation
+        validation_messages = validate_simulation_parameters(params)
         
-        st.subheader("⚠️ Parameter Validation")
-        for msg_type, message in validation_messages:
-            st.markdown(f'<div class="validation-{msg_type}">{message}</div>', unsafe_allow_html=True)
-    
-    with col1:
-        if run_simulation:
-            # Run simulation
-            with st.spinner("🔄 Running enhanced simulation..."):
-                results = run_enhanced_simulation(sim_params)
-            
-            st.success("✅ Simulation completed successfully!")
-            
-            # Performance summary
-            st.markdown("""
-            <div class="performance-summary">
-                <h3>🎯 Performance Summary</h3>
-                <p>Final thruster performance after thermal equilibrium</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Display key results
-            col1a, col2a, col3a, col4a, col5a = st.columns(5)
-            
-            with col1a:
-                st.metric(
-                    "Thrust", 
-                    f"{results['final_values']['thrust']:.4f} N",
-                    help="Total thrust force"
-                )
-            
-            with col2a:
-                st.metric(
-                    "Specific Impulse", 
-                    f"{results['final_values']['specific_impulse']:.1f} s",
-                    help="Isp = V₂ / g₀"
-                )
-            
-            with col3a:
-                st.metric(
-                    "Exhaust Velocity", 
-                    f"{results['final_values']['exhaust_velocity']:.0f} m/s",
-                    help="Nozzle exit velocity"
-                )
-            
-            with col4a:
-                st.metric(
-                    "Chamber Pressure", 
-                    f"{results['final_values']['chamber_pressure']:.3f} MPa",
-                    help="Computed from choked flow"
-                )
-            
-            with col5a:
-                st.metric(
-                    "Exit Mach", 
-                    f"{results['final_values']['mach_number']:.2f}",
-                    help="Exit Mach number"
-                )
-            
-            # Additional performance metrics
-            st.subheader("🔬 Advanced Performance Metrics")
-            col1b, col2b, col3b, col4b = st.columns(4)
-            
-            with col1b:
-                st.metric(
-                    "Exit Temperature",
-                    f"{results['final_values']['exit_temperature']:.0f} K",
-                    help="Gas temperature at nozzle exit"
-                )
-            
-            with col2b:
-                st.metric(
-                    "Characteristic Velocity",
-                    f"{results['theoretical']['characteristic_velocity']:.0f} m/s",
-                    help="c* - combustion efficiency indicator"
-                )
-            
-            with col3b:
-                st.metric(
-                    "Thrust Coefficient",
-                    f"{results['theoretical']['thrust_coefficient']:.3f}",
-                    help="Cf - nozzle performance indicator"
-                )
-            
-            with col4b:
-                thrust_to_weight = results['final_values']['thrust'] / (results['mass_flow_rate'] * G0)
-                st.metric(
-                    "Thrust-to-Weight",
-                    f"{thrust_to_weight:.1f}",
-                    help="Thrust per unit weight flow"
-                )
-            
-            # Create comprehensive plots
-            fig = make_subplots(
-                rows=5, cols=2,
-                subplot_titles=(
-                    "Chamber Temperature vs Time",
-                    "Specific Impulse vs Time", 
-                    "Total Thrust vs Time",
-                    "Component Thrust vs Time",
-                    "Chamber Pressure vs Time",
-                    "Exhaust Velocity vs Time",
-                    "Exit Mach Number vs Time",
-                    "Specific Heat Capacity vs Time",
-                    "Exit Temperature vs Time",
-                    ""  # Empty subplot for 5x2 grid
-                ),
-                specs=[
-                    [{"secondary_y": False}, {"secondary_y": False}],
-                    [{"secondary_y": False}, {"secondary_y": True}],  # Component thrust needs secondary y-axis
-                    [{"secondary_y": False}, {"secondary_y": False}],
-                    [{"secondary_y": False}, {"secondary_y": False}],
-                    [{"secondary_y": False}, {"secondary_y": False}]
-                ]
-            )
-            
-            # =============================================================================
-            # ROW 1: TEMPERATURE AND SPECIFIC IMPULSE
-            # =============================================================================
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['temperatures'], 
-                    name="Chamber Temperature",
-                    line=dict(color='#ff6b6b', width=3)
-                ),
-                row=1, col=1
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['specific_impulses'], 
-                    name="Specific Impulse",
-                    line=dict(color='#4ecdc4', width=3)
-                ),
-                row=1, col=2
-            )
-            
-            # =============================================================================
-            # ROW 2: TOTAL THRUST AND COMPONENT THRUST
-            # =============================================================================
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['thrust_forces'], 
-                    name="Total Thrust",
-                    line=dict(color='#45b7d1', width=3)
-                ),
-                row=2, col=1
-            )
-            
-            # Component thrust traces (using secondary y-axis for better visualization)
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['momentum_thrusts'], 
-                    name="Momentum Thrust",
-                    line=dict(color='#96ceb4', width=2, dash='dash')
-                ),
-                row=2, col=2
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['pressure_thrusts'], 
-                    name="Pressure Thrust",
-                    line=dict(color='#feca57', width=2, dash='dot')
-                ),
-                row=2, col=2, secondary_y=True
-            )
-            
-            # =============================================================================
-            # ROW 3: CHAMBER PRESSURE AND EXHAUST VELOCITY
-            # =============================================================================
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['chamber_pressures'], 
-                    name="Chamber Pressure",
-                    line=dict(color='#ff9ff3', width=3)
-                ),
-                row=3, col=1
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['exhaust_velocities'], 
-                    name="Exhaust Velocity",
-                    line=dict(color='#54a0ff', width=3)
-                ),
-                row=3, col=2
-            )
-            
-            # =============================================================================
-            # ROW 4: EXIT MACH NUMBER AND SPECIFIC HEAT CAPACITY
-            # =============================================================================
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['mach_numbers'], 
-                    name="Exit Mach Number",
-                    line=dict(color='#ff6348', width=3)
-                ),
-                row=4, col=1
-            )
-            
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['cp_values'], 
-                    name="Specific Heat Capacity",
-                    line=dict(color='#5f27cd', width=3)
-                ),
-                row=4, col=2
-            )
-            
-            # =============================================================================
-            # ROW 5: EXIT TEMPERATURE (LEFT SUBPLOT ONLY)
-            # =============================================================================
-            fig.add_trace(
-                go.Scatter(
-                    x=results['times'], 
-                    y=results['exit_temperatures'], 
-                    name="Exit Temperature",
-                    line=dict(color='#ff9f43', width=3)
-                ),
-                row=5, col=1
-            )
-            
-            # =============================================================================
-            # LAYOUT CONFIGURATION
-            # =============================================================================
-            fig.update_layout(
-                height=1500,
-                showlegend=True,
-                title_text="Comprehensive Thruster Performance Analysis",
-                title_x=0.5,
-                font=dict(size=11),
-                legend=dict(
-                    x=1.05, 
-                    y=1,
-                    bgcolor="rgba(255,255,255,0.8)",
-                    bordercolor="rgba(0,0,0,0.2)",
-                    borderwidth=1
-                )
-            )
-            
-            # =============================================================================
-            # Y-AXIS LABELS CONFIGURATION
-            # =============================================================================
-            # Row 1: Temperature and Isp
-            fig.update_yaxes(title_text="Temperature (K)", row=1, col=1)
-            fig.update_yaxes(title_text="Isp (s)", row=1, col=2)
-            
-            # Row 2: Thrust components
-            fig.update_yaxes(title_text="Total Thrust (N)", row=2, col=1)
-            fig.update_yaxes(title_text="Momentum Thrust (N)", row=2, col=2)
-            fig.update_yaxes(title_text="Pressure Thrust (N)", row=2, col=2, secondary_y=True)
-            
-            # Row 3: Pressure and velocity
-            fig.update_yaxes(title_text="Pressure (MPa)", row=3, col=1)
-            fig.update_yaxes(title_text="Velocity (m/s)", row=3, col=2)
-            
-            # Row 4: Mach and heat capacity
-            fig.update_yaxes(title_text="Mach Number", row=4, col=1)
-            fig.update_yaxes(title_text="Cp (J/kg·K)", row=4, col=2)
-            
-            # Row 5: Exit temperature
-            fig.update_yaxes(title_text="Temperature (K)", row=5, col=1)
-            
-            # =============================================================================
-            # X-AXIS LABELS CONFIGURATION
-            # =============================================================================  
-            fig.update_xaxes(title_text="Time (s)")
-            
-            # =============================================================================
-            # DISPLAY THE PLOT
-            # =============================================================================
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Energy analysis
-            st.subheader("⚡ Energy Analysis")
-            total_energy_input = Q_input * total_time  # Joules
-            kinetic_energy_per_second = 0.5 * results['mass_flow_rate'] * results['final_values']['exhaust_velocity']**2
-            efficiency = (kinetic_energy_per_second / Q_input) * 100 if Q_input > 0 else 0
-            
-            col1c, col2c, col3c = st.columns(3)
-            with col1c:
-                st.metric("Total Energy Input", f"{total_energy_input:.0f} J", help="Q × time")
-            with col2c:
-                st.metric("Kinetic Power Output", f"{kinetic_energy_per_second:.2f} W", help="½ṁV²")
-            with col3c:
-                st.metric("Thermal Efficiency", f"{efficiency:.1f}%", help="Kinetic power / Heat input")
-            
-            # Detailed results table
-            st.subheader("📋 Detailed Simulation Results")
-            results_df = pd.DataFrame({
-                'Time (s)': results['times'],
-                'Temperature (K)': results['temperatures'],
-                'Chamber Pressure (MPa)': results['chamber_pressures'],
-                'Exhaust Velocity (m/s)': results['exhaust_velocities'],
-                'Specific Impulse (s)': results['specific_impulses'],
-                'Total Thrust (N)': results['thrust_forces'],
-                'Momentum Thrust (N)': results['momentum_thrusts'],
-                'Pressure Thrust (N)': results['pressure_thrusts'],
-                'Exit Mach': results['mach_numbers'],
-                'Exit Temperature (K)': results['exit_temperatures'],
-                'Cp (J/kg·K)': results['cp_values']
-            })
-            
-            st.dataframe(
-                results_df.style.format({
-                    'Time (s)': '{:.2f}',
-                    'Temperature (K)': '{:.1f}',
-                    'Chamber Pressure (MPa)': '{:.4f}',
-                    'Exhaust Velocity (m/s)': '{:.2f}',
-                    'Specific Impulse (s)': '{:.2f}',
-                    'Total Thrust (N)': '{:.5f}',
-                    'Momentum Thrust (N)': '{:.5f}',
-                    'Pressure Thrust (N)': '{:.6f}',
-                    'Exit Mach': '{:.3f}',
-                    'Exit Temperature (K)': '{:.1f}',
-                    'Cp (J/kg·K)': '{:.0f}'
-                }),
-                height=400,
-                use_container_width=True
-            )
-            
-            # Comparison with theoretical values
-            st.subheader("📊 Theoretical vs Actual Comparison")
-            theoretical_isp = results['theoretical']['characteristic_velocity'] * results['theoretical']['thrust_coefficient'] / G0
-            actual_isp = results['final_values']['specific_impulse']
-            
-            comparison_df = pd.DataFrame({
-                'Metric': ['Specific Impulse (s)', 'Thrust Coefficient', 'Exit Mach Number'],
-                'Theoretical': [theoretical_isp, results['theoretical']['thrust_coefficient'], results['theoretical']['exit_mach']],
-                'Actual': [actual_isp, results['theoretical']['thrust_coefficient'], results['final_values']['mach_number']],
-                'Difference (%)': [
-                    ((actual_isp - theoretical_isp) / theoretical_isp * 100) if theoretical_isp > 0 else 0,
-                    0,  # Thrust coefficient is the same
-                    ((results['final_values']['mach_number'] - results['theoretical']['exit_mach']) / results['theoretical']['exit_mach'] * 100) if results['theoretical']['exit_mach'] > 0 else 0
-                ]
-            })
-            
-            st.dataframe(
-                comparison_df.style.format({
-                    'Theoretical': '{:.3f}',
-                    'Actual': '{:.3f}',
-                    'Difference (%)': '{:.1f}'
-                }),
-                use_container_width=True
-            )
-            
-            # Download results
-            csv_data = results_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Results (CSV)",
-                data=csv_data,
-                file_name=f"butane_thruster_simulation_{int(total_time)}s.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-            
-            # Performance recommendations
-            st.subheader("💡 Performance Recommendations")
-            
-            recommendations = []
-            
-            if results['final_values']['specific_impulse'] < 50:
-                recommendations.append("Consider increasing chamber temperature for better Isp")
-            elif results['final_values']['specific_impulse'] > 80:
-                recommendations.append("Excellent Isp achieved - good thermal management")
-            
-            if results['final_values']['mach_number'] < 2:
-                recommendations.append("Exit Mach number is low - consider optimizing nozzle design")
-            elif results['final_values']['mach_number'] > 4:
-                recommendations.append("High exit Mach achieved - efficient expansion")
-            
-            if efficiency < 5:
-                recommendations.append("Low thermal efficiency - check heat transfer and insulation")
-            elif efficiency > 15:
-                recommendations.append("Good thermal efficiency achieved")
-            
-            pressure_ratio = results['final_values']['chamber_pressure'] / (P_exit)
-            if pressure_ratio < 10:
-                recommendations.append("Low pressure ratio - consider increasing chamber pressure")
-            elif pressure_ratio > 100:
-                recommendations.append("High pressure ratio - excellent expansion potential")
-            
-            for i, rec in enumerate(recommendations, 1):
-                st.markdown(f"**{i}.** {rec}")
+        # Display validation messages
+        for message_type, message_text in validation_messages:
+            if message_type == "excellent":
+                st.markdown(f'<div class="validation-excellent">{message_text}</div>', unsafe_allow_html=True)
+            elif message_type == "good":
+                st.markdown(f'<div class="validation-good">{message_text}</div>', unsafe_allow_html=True)
+            elif message_type == "warning":
+                st.markdown(f'<div class="validation-warning">{message_text}</div>', unsafe_allow_html=True)
+            elif message_type == "danger":
+                st.markdown(f'<div class="validation-danger">{message_text}</div>', unsafe_allow_html=True)
         
-        else:
-            st.info("🎯 Configure parameters in the sidebar and click 'Run Simulation' to begin analysis.")
-            
-            # Show sample Cp curve
-            T_range = np.linspace(200, 2000, 100)
-            cp_range = [get_cp(T) for T in T_range]
-            
-            fig_cp = go.Figure()
-            fig_cp.add_trace(
-                go.Scatter(
-                    x=T_range, 
-                    y=cp_range, 
-                    mode='lines',
-                    name='Cp(T)',
-                    line=dict(color='#e74c3c', width=3)
-                )
-            )
-            fig_cp.add_scatter(
-                x=T_CP_DATA, 
-                y=CP_DATA, 
-                mode='markers',
-                name='Data Points',
-                marker=dict(color='#3498db', size=8)
-            )
-            
-            fig_cp.update_layout(
-                title="Butane Specific Heat Capacity vs Temperature",
-                xaxis_title="Temperature (K)",
-                yaxis_title="Cp (J/kg·K)",
-                height=400
-            )
-            
-            st.plotly_chart(fig_cp, use_container_width=True)
-            
-            # Show example thermodynamic relationships
-            st.subheader("🔬 Thermodynamic Relationships")
-            
-            st.markdown("""
-            **Key Relationships in Butane Thruster Operation:**
-            
-            1. **Energy Balance**: Q = ṁ × Cp × dT/dt
-               - Heat input raises chamber temperature
-               - Higher Cp requires more energy for same temperature rise
-            
-            2. **Choked Flow**: ṁ = P₁ × A* × √(γ/RT₁) × (2/(γ+1))^((γ+1)/(2(γ-1)))
-               - Mass flow determines chamber pressure for given throat area
-               - Higher temperature reduces required pressure
-            
-            3. **Isentropic Expansion**: V₂ = √(2γRT₁/(γ-1) × [1 - (P₂/P₁)^((γ-1)/γ)])
-               - Higher chamber temperature increases exhaust velocity
-               - Lower exit pressure improves expansion efficiency
-            
-            4. **Thrust Generation**: F = ṁV₂ + (P₂ - P₃)A₂
-               - Momentum thrust dominates in vacuum conditions
-               - Pressure thrust significant at high ambient pressures
-            """)
-
+        # Run simulation
+        results = run_enhanced_simulation(params)
+        
+        # --- Display Results ---
+        
+        st.markdown('<div class="performance-summary">', unsafe_allow_html=True)
+        st.header("✨ Final Simulation Results")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(label="Final Thrust", value=f"{results['final_values']['thrust']:.3f} N")
+        with col2:
+            st.metric(label="Final Specific Impulse", value=f"{results['final_values']['specific_impulse']:.1f} s")
+        with col3:
+            st.metric(label="Final Exhaust Velocity", value=f"{results['final_values']['exhaust_velocity']:.1f} m/s")
+        with col4:
+            st.metric(label="Final Mass Flow Rate", value=f"{results['final_values']['mass_flow_rate']*1000:.3f} g/s")
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Plotly Charts
+        st.header("📈 Simulation Plots Over Time")
+        
+        fig = make_subplots(rows=3, cols=2,
+                            subplot_titles=("Thrust Force (N)", "Specific Impulse (s)",
+                                            "Chamber Pressure (Pa) and Tank Pressure (Pa)",
+                                            "Mass Flow Rate (kg/s)", "Chamber Temperature (K)",
+                                            "Exhaust Velocity (m/s)"))
+        
+        # Thrust Force
+        fig.add_trace(go.Scatter(x=results['times'], y=results['thrust_forces'],
+                                 mode='lines', name='Total Thrust', line=dict(color='#f093fb')),
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(x=results['times'], y=results['momentum_thrusts'],
+                                 mode='lines', name='Momentum Thrust', line=dict(dash='dash', color='#667eea')),
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(x=results['times'], y=results['pressure_thrusts'],
+                                 mode='lines', name='Pressure Thrust', line=dict(dash='dot', color='#764ba2')),
+                      row=1, col=1)
+        
+        # Specific Impulse
+        fig.add_trace(go.Scatter(x=results['times'], y=results['specific_impulses'],
+                                 mode='lines', name='Specific Impulse', line=dict(color='#4facfe')),
+                      row=1, col=2)
+        
+        # Pressures
+        fig.add_trace(go.Scatter(x=results['times'], y=results['chamber_pressures'],
+                                 mode='lines', name='Chamber Pressure', line=dict(color='#38f9d7')),
+                      row=2, col=1)
+        fig.add_trace(go.Scatter(x=results['times'], y=results['tank_pressures'],
+                                 mode='lines', name='Tank Pressure', line=dict(dash='dash', color='#43e97b')),
+                      row=2, col=1)
+        
+        # Mass Flow Rate
+        fig.add_trace(go.Scatter(x=results['times'], y=results['mass_flow_rates'],
+                                 mode='lines', name='Mass Flow Rate', line=dict(color='#ff7e5f')),
+                      row=2, col=2)
+        
+        # Temperature
+        fig.add_trace(go.Scatter(x=results['times'], y=results['temperatures'],
+                                 mode='lines', name='Chamber Temperature', line=dict(color='#ffa500')),
+                      row=3, col=1)
+        
+        # Exhaust Velocity
+        fig.add_trace(go.Scatter(x=results['times'], y=results['exhaust_velocities'],
+                                 mode='lines', name='Exhaust Velocity', line=dict(color='#ff006e')),
+                      row=3, col=2)
+        
+        fig.update_layout(height=1000, title_text="Thruster Performance Over Time", showlegend=True, template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Dataframe
+        st.header("📊 Simulation Data Table")
+        df_results = pd.DataFrame({
+            "Time (s)": results['times'],
+            "Chamber Temp (K)": results['temperatures'],
+            "Chamber Press (Pa)": results['chamber_pressures'],
+            "Tank Press (Pa)": results['tank_pressures'],
+            "Mass Flow Rate (kg/s)": results['mass_flow_rates'],
+            "Exhaust Vel (m/s)": results['exhaust_velocities'],
+            "Specific Impulse (s)": results['specific_impulses'],
+            "Thrust (N)": results['thrust_forces'],
+            "Butane Mass (kg)": results['butane_masses']
+        })
+        st.dataframe(df_results)
+        
+# Entry point
 if __name__ == "__main__":
     main()
