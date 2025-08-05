@@ -412,11 +412,11 @@ def validate_simulation_parameters(params):
             messages.append(("good", "Good pressure ratio for efficient expansion."))
     
     # Orifice validation
-    if params['orifice_diameter'] <= 0:
-        messages.append(("danger", "Orifice diameter must be positive."))
+    if params['orifice_radius'] <= 0:
+        messages.append(("danger", "Orifice radius must be positive."))
     
     # Flow validation
-    expected_flow = params['orifice_diameter'] * 1000  # Rough estimate
+    expected_flow = params['orifice_radius'] * 1000  # Rough estimate
     if expected_flow < 0.001:
         messages.append(("warning", "Very small orifice may result in very low flow rates."))
     elif expected_flow > 1.0:
@@ -442,19 +442,19 @@ def run_enhanced_simulation(params):
     initial_butane_mass = params['initial_butane_mass']
     tank_volume = params['tank_volume']  # L
     tank_temperature = params['tank_temperature']  # K
-    orifice_diameter = params['orifice_diameter']  # mm
+    orifice_radius = params['orifice_radius']  # mm
     discharge_coefficient = params['discharge_coefficient']
 
     # New tunable nozzle geometry parameters
-    user_throat_diameter = params['throat_diameter']
-    user_exit_diameter = params['exit_diameter']
+    user_throat_radius = params['throat_radius']
+    user_exit_radius = params['exit_radius']
     
     # Calculate areas from user inputs
-    A_throat_fixed = np.pi * (user_throat_diameter * 1e-3 / 2)**2
-    A_exit_fixed = np.pi * (user_exit_diameter * 1e-3 / 2)**2
+    A_throat_fixed = np.pi * (user_throat_radius * 1e-3)**2
+    A_exit_fixed = np.pi * (user_exit_radius * 1e-3)**2
     
     # Calculate other fixed areas
-    A_orifice = np.pi * (orifice_diameter * 1e-3 / 2)**2  # Convert mm to m
+    A_orifice = np.pi * (orifice_radius * 1e-3)**2  # Convert mm to m
     expansion_ratio = A_exit_fixed / A_throat_fixed if A_throat_fixed > 0 else 0
     
     # Nozzle efficiency
@@ -644,14 +644,14 @@ def main():
         st.subheader("Thruster Chamber & Nozzle")
 
         # Tunable Orifice Input
-        orifice_diameter = st.number_input(
-            "Orifice Diameter (mm)",
-            min_value=0.05,
-            max_value=1.0,
-            value=0.25,
-            step=0.01,
-            format="%.2f",
-            help="Diameter of the inlet orifice from the tank to the chamber. Adjusting this changes the mass flow rate."
+        orifice_radius = st.number_input(
+            "Orifice Radius (mm)",
+            min_value=0.025,
+            max_value=0.5,
+            value=0.125,
+            step=0.005,
+            format="%.3f",
+            help="Radius of the inlet orifice from the tank to the chamber. Adjusting this changes the mass flow rate."
         )
 
         discharge_coefficient = st.number_input(
@@ -666,27 +666,27 @@ def main():
         
         # NEW: Tunable Nozzle Geometry
         st.subheader("Nozzle Geometry")
-        throat_diameter = st.number_input(
-            "Throat Diameter (mm)",
-            min_value=0.1,
-            max_value=2.0,
-            value=0.488,  # Default to original spec
-            step=0.01,
+        throat_radius = st.number_input(
+            "Throat Radius (mm)",
+            min_value=0.05,
+            max_value=1.0,
+            value=0.244,  # Default to original spec (0.488mm diameter)
+            step=0.005,
             format="%.3f",
-            help="Diameter of the nozzle throat. This controls mass flow choking."
+            help="Radius of the nozzle throat. This controls mass flow choking."
         )
         
-        exit_diameter = st.number_input(
-            "Exit Diameter (mm)",
-            min_value=1.0,
-            max_value=20.0,
-            value=11.24, # Default to original spec
-            step=0.1,
+        exit_radius = st.number_input(
+            "Exit Radius (mm)",
+            min_value=0.5,
+            max_value=10.0,
+            value=5.62, # Default to original spec (11.24mm diameter)
+            step=0.01,
             format="%.2f",
-            help="Diameter of the nozzle exit. This controls the expansion ratio and thrust."
+            help="Radius of the nozzle exit. This controls the expansion ratio and thrust."
         )
         
-        st.caption(f"Calculated Expansion Ratio: { (exit_diameter/throat_diameter)**2:.2f}")
+        st.caption(f"Calculated Expansion Ratio: { (exit_radius/throat_radius)**2:.2f}")
 
         nozzle_efficiency = st.slider(
             "Nozzle Efficiency (%)",
@@ -764,6 +764,16 @@ def main():
             st.session_state['run_sim'] = True
         else:
             st.session_state['run_sim'] = False
+            
+        # Display the Cp table in a separate sidebar section
+        st.markdown('---')
+        st.subheader("Butane $C_p$ Data Table")
+        st.info("Specific heat capacity ($$C_p$$) for Butane as a function of temperature. This data is used to model the thermal response of the thruster.")
+        cp_df = pd.DataFrame({
+            "Temperature (K)": T_CP_DATA,
+            "Specific Heat $C_p$ (J/kg·K)": CP_DATA
+        })
+        st.dataframe(cp_df, height=300)
 
     # Main content area
     if st.session_state.get('run_sim', False):
@@ -780,11 +790,11 @@ def main():
             'initial_butane_mass': initial_butane_mass,
             'tank_volume': tank_volume,
             'tank_temperature': tank_temperature,
-            'orifice_diameter': orifice_diameter,
+            'orifice_radius': orifice_radius,
             'discharge_coefficient': discharge_coefficient,
             'nozzle_efficiency': nozzle_efficiency,
-            'throat_diameter': throat_diameter,  # New parameter
-            'exit_diameter': exit_diameter,      # New parameter
+            'throat_radius': throat_radius,
+            'exit_radius': exit_radius,
         }
         
         # Run validation
@@ -819,6 +829,29 @@ def main():
         with col4:
             st.metric(label="Final Mass Flow Rate", value=f"{results['final_values']['mass_flow_rate']*1000:.3f} g/s")
         st.markdown('</div>', unsafe_allow_html=True)
+        
+        # --- Plot the Cp table data ---
+        st.header("🔬 Butane Specific Heat Capacity ($C_p$)")
+        st.info("This plot visualizes the specific heat data used in the simulation to model the thermodynamic behavior of butane.")
+        
+        fig_cp = go.Figure()
+        fig_cp.add_trace(go.Scatter(
+            x=T_CP_DATA,
+            y=CP_DATA,
+            mode='lines+markers',
+            name='Specific Heat Capacity',
+            line=dict(color='#8A2BE2', width=2),
+            marker=dict(size=8, color='#8A2BE2', symbol='circle')
+        ))
+        
+        fig_cp.update_layout(
+            title='Specific Heat Capacity ($C_p$) vs. Temperature',
+            xaxis_title='Temperature (K)',
+            yaxis_title='Specific Heat $C_p$ (J/kg·K)',
+            template="plotly_white",
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_cp, use_container_width=True)
         
         # Plotly Charts
         st.header("📈 Simulation Plots Over Time")
