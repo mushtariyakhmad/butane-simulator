@@ -919,9 +919,9 @@ def main():
         ))
         
         fig_cp.update_layout(
-            title='Specific Heat Capacity ($C_p$) vs. Temperature',
+            title='Specific Heat Capacity (C_p) vs. Temperature',
             xaxis_title='Temperature (K)',
-            yaxis_title='Specific Heat $C_p$ (J/kg·K)',
+            yaxis_title='Specific Heat C_p (J/kg·K)',
             template="plotly_white",
             hovermode="x unified"
         )
